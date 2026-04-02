@@ -197,6 +197,54 @@ class Database:
                     FOREIGN KEY (user_id) REFERENCES users(id)
                 )
             """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS merchant_aliases (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    family_id INTEGER NOT NULL,
+                    alias_normalized TEXT NOT NULL,
+                    canonical_name TEXT NOT NULL,
+                    canonical_normalized TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 100,
+                    created_by INTEGER,
+                    is_active BOOLEAN NOT NULL DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (family_id) REFERENCES families(id),
+                    FOREIGN KEY (created_by) REFERENCES users(id),
+                    UNIQUE(family_id, alias_normalized)
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS merchant_category_rules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    family_id INTEGER NOT NULL,
+                    merchant_normalized TEXT NOT NULL,
+                    merchant_display_name TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 100,
+                    source TEXT NOT NULL CHECK(source IN ('admin', 'feedback')),
+                    notes TEXT,
+                    created_by INTEGER,
+                    is_active BOOLEAN NOT NULL DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (family_id) REFERENCES families(id),
+                    FOREIGN KEY (created_by) REFERENCES users(id),
+                    UNIQUE(family_id, merchant_normalized, source)
+                )
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_merchant_aliases_lookup
+                ON merchant_aliases(family_id, alias_normalized, priority)
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_merchant_category_rules_lookup
+                ON merchant_category_rules(family_id, merchant_normalized, priority)
+            """)
             
             conn.commit()
 
@@ -210,6 +258,8 @@ class Database:
 
             tables = [
                 'audit_logs',
+                'merchant_category_rules',
+                'merchant_aliases',
                 'receipt_deductions',
                 'receipt_items',
                 'receipts',

@@ -8,7 +8,7 @@ The end-to-end workflow is implemented:
 
 1. Create a family account
 2. Upload receipt images
-3. Extract data with AI
+3. Extract data with OCR first and optionally re-read with AI
 4. Detect duplicates
 5. Review and confirm pending receipts
 6. Analyze spending in the dashboard
@@ -32,12 +32,12 @@ The remaining work is primarily product enhancement, documentation alignment, an
 - File hashing for duplicate prevention
 - Admin reset support for database and receipt images
 
-### AI Receipt Processing
-- AI provider abstraction
-- OpenAI provider implemented as the primary runtime path
+### Receipt Processing
+- OCR-first extractor implemented with local Tesseract
+- AI provider abstraction retained for re-read and fallback flows
+- OpenAI provider implemented as the primary AI runtime path
 - Gemini provider retained as an alternate provider
-- Structured receipt extraction with JSON parsing
-- Extraction preview shown after upload
+- Structured extraction preview shown after upload
 
 ### Receipt Workflow
 - Upload page processes images and shows extraction previews
@@ -79,7 +79,8 @@ The remaining work is primarily product enhancement, documentation alignment, an
 ## Current Product Behavior
 
 ### Upload Flow
-- Upload scans and previews receipts
+- Upload scans and previews receipts with OCR first
+- Each OCR-created pending receipt can be re-read with AI in place
 - Confirmation happens in Receipts > Pending
 - After processing completes, the uploader resets to its empty state
 
@@ -143,11 +144,7 @@ The remaining work is primarily product enhancement, documentation alignment, an
 - Restore from backup
 - Safer reset workflow with optional backup prompt
 
-#### 5. OCR Fallback
-- Add a fallback OCR path for poor-quality images
-- Improve extraction reliability when vision output is weak
-
-#### 6. Mobile Usability Improvements
+#### 5. Mobile Usability Improvements
 - Better layout for narrow screens
 - More compact tables and cards
 - Improved image and pending-review interaction on mobile
@@ -173,9 +170,6 @@ This was intentionally left out of the MVP and should be treated as a later phas
 
 ## Known Technical Debt
 
-### Documentation Alignment
-- `README.md` and `GETTING_STARTED.md` still need to be aligned with current behavior
-
 ### Time Handling Cleanup
 - Dashboard period logic has been corrected to local-date semantics
 - Date and time handling should still be standardized further across the app
@@ -183,9 +177,6 @@ This was intentionally left out of the MVP and should be treated as a later phas
 ### Warning Cleanup
 - Tests still surface non-blocking warnings related to `datetime.utcnow()`
 - Gemini support still uses a deprecated SDK path
-
-### Classification Maintainability
-- Category rules currently live in code and should move to admin-manageable configuration
 
 ## Recommended Roadmap
 
@@ -206,7 +197,6 @@ This was intentionally left out of the MVP and should be treated as a later phas
 - Improved admin operations
 
 ### V2
-- OCR fallback
 - Budgeting and alerts
 - AI financial guidance
 - Stronger mobile UX

@@ -15,20 +15,27 @@ if (-not (Test-Path .env)) {
     Read-Host "Press Enter to continue after adding your API key"
 }
 
+$venvDir = ".venv"
+
+if (-not (Test-Path $venvDir) -and (Test-Path "venv")) {
+    $venvDir = "venv"
+}
+
 # Check if virtual environment exists
-if (-not (Test-Path venv)) {
+if (-not (Test-Path $venvDir)) {
     Write-Host "📦 Creating virtual environment..." -ForegroundColor Yellow
-    python -m venv venv
+    python -m venv .venv
+    $venvDir = ".venv"
 }
 
 # Activate virtual environment
 Write-Host "🔧 Activating virtual environment..." -ForegroundColor Yellow
-& .\venv\Scripts\Activate.ps1
+& ".\$venvDir\Scripts\Activate.ps1"
 
 # Install dependencies
 Write-Host "📥 Installing dependencies..." -ForegroundColor Yellow
-pip install --upgrade pip --quiet
-pip install -r requirements.txt --quiet
+& ".\$venvDir\Scripts\python.exe" -m pip install --upgrade pip --quiet
+& ".\$venvDir\Scripts\python.exe" -m pip install -r requirements.txt --quiet
 
 # Create data directories
 Write-Host "📁 Creating data directories..." -ForegroundColor Yellow
@@ -43,4 +50,4 @@ Write-Host "🚀 Starting OurCents..." -ForegroundColor Cyan
 Write-Host ""
 
 # Run the app
-streamlit run app.py
+& ".\$venvDir\Scripts\python.exe" -m streamlit run app.py

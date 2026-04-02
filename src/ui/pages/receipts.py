@@ -21,6 +21,16 @@ logger = logging.getLogger(__name__)
 def show():
     """Display receipts list page."""
     st.title("Receipts")
+
+    deleted_receipt_notice = st.session_state.pop('deleted_receipt_notice', None)
+    if deleted_receipt_notice:
+        st.success(
+            "Deleted receipt: "
+            f"{deleted_receipt_notice['merchant_name']} | "
+            f"{deleted_receipt_notice['purchase_date']} | "
+            f"{deleted_receipt_notice['currency']} ${deleted_receipt_notice['total_amount']:.2f} | "
+            f"previous status {deleted_receipt_notice['status']}"
+        )
     
     db = get_database()
     storage = get_file_storage()
@@ -137,6 +147,44 @@ def show():
                                     f"- {item['description']} | qty {item['quantity']} | "
                                     f"${item['total_price']:.2f} | {item['category']}"
                                 )
+
+                        if st.session_state.is_admin:
+                            st.divider()
+                            st.write("**Admin Actions:**")
+                            with st.container(border=True):
+                                st.error(
+                                    "Danger Zone: deleting a receipt permanently removes the receipt record, line items, "
+                                    "deduction data, and stored image."
+                                )
+                                st.write(
+                                    f"Target: {receipt['merchant_name']} | {receipt['purchase_date']} | "
+                                    f"{receipt['currency']} ${receipt['total_amount']:.2f} | {receipt['status']}"
+                                )
+                                confirm_delete_key = f"confirm_delete_receipt_{receipt['id']}"
+                                confirm_delete = st.checkbox(
+                                    "I understand this deletion is permanent.",
+                                    key=confirm_delete_key,
+                                )
+                                if st.button(
+                                    "Permanently Delete Receipt",
+                                    key=f"delete_receipt_{receipt['id']}",
+                                    type="primary",
+                                ):
+                                    if not confirm_delete:
+                                        st.error("Confirm deletion before removing the receipt.")
+                                    else:
+                                        deleted_receipt = ingestion_service.delete_receipt(
+                                            st.session_state.family_id,
+                                            receipt['id'],
+                                            st.session_state.user_id,
+                                        )
+                                        st.session_state.deleted_receipt_notice = deleted_receipt
+                                        logger.warning(
+                                            "Receipt deleted from receipts page receipt_id=%s by_user=%s",
+                                            receipt['id'],
+                                            st.session_state.user_id,
+                                        )
+                                        st.rerun()
 
                         if receipt['status'] in [ReceiptStatus.PENDING.value, ReceiptStatus.DUPLICATE_SUSPECTED.value]:
                             edit_mode_key = f"edit_mode_{receipt['id']}"

@@ -17,20 +17,27 @@ if [ ! -f .env ]; then
     read -p "Press Enter to continue after adding your API key..."
 fi
 
+VENV_DIR=".venv"
+
+if [ ! -d "$VENV_DIR" ] && [ -d "venv" ]; then
+    VENV_DIR="venv"
+fi
+
 # Check if virtual environment exists
-if [ ! -d "venv" ]; then
+if [ ! -d "$VENV_DIR" ]; then
     echo "📦 Creating virtual environment..."
-    python3 -m venv venv
+    python3 -m venv .venv
+    VENV_DIR=".venv"
 fi
 
 # Activate virtual environment
 echo "🔧 Activating virtual environment..."
-source venv/bin/activate
+source "$VENV_DIR/bin/activate"
 
 # Install dependencies
 echo "📥 Installing dependencies..."
-pip install -q --upgrade pip
-pip install -q -r requirements.txt
+"$VENV_DIR/bin/python" -m pip install -q --upgrade pip
+"$VENV_DIR/bin/python" -m pip install -q -r requirements.txt
 
 # Create data directories
 echo "📁 Creating data directories..."
@@ -45,4 +52,4 @@ echo "🚀 Starting OurCents..."
 echo ""
 
 # Run the app
-streamlit run app.py
+"$VENV_DIR/bin/python" -m streamlit run app.py

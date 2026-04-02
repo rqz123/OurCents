@@ -77,7 +77,8 @@ def process_uploads(uploaded_files):
                     user_id=st.session_state.user_id,
                     file_content=file_content,
                     filename=uploaded_file.name,
-                    mime_type=mime_type
+                    mime_type=mime_type,
+                    extraction_method='ocr',
                 )
             )
 
@@ -87,6 +88,7 @@ def process_uploads(uploaded_files):
                 'receipt_id': receipt_id,
                 'info': info,
                 'file_content': file_content,
+                'mime_type': mime_type,
             })
             
             # Display result
@@ -106,8 +108,9 @@ def process_uploads(uploaded_files):
                 'filename': uploaded_file.name,
                 'status': 'error',
                 'receipt_id': None,
-                'info': {'error': str(e)},
-                'file_content': None,
+                'info': {'error': str(e), 'extraction_method': 'ocr'},
+                'file_content': file_content,
+                'mime_type': mime_type,
             })
         
         progress_bar.progress((idx + 1) / total)
@@ -124,7 +127,7 @@ def _render_processing_results(processing_results):
 
     st.success("Processing complete. The uploader is ready for another batch.")
 
-    for result in processing_results:
+    for result_index, result in enumerate(processing_results):
         filename = result['filename']
         status = result['status']
         info = result.get('info') or {}
@@ -137,6 +140,7 @@ def _render_processing_results(processing_results):
                 result['receipt_id'],
                 info,
                 status,
+                result_index=result_index,
             )
         elif status == 'duplicate_hash':
             st.warning(f"⚠️ {filename} - {info.get('reason', 'Duplicate receipt detected')}")
@@ -148,14 +152,19 @@ def _render_processing_results(processing_results):
                 result['receipt_id'],
                 info,
                 status,
+                result_index=result_index,
             )
         else:
             st.error(f"❌ {filename} - {info.get('error', 'Processing failed')}")
+            if result.get('file_content') and result.get('mime_type') and info.get('extraction_method') == 'ocr':
+                if st.button("Process With AI Instead", key=f"upload-ai-fallback-{result_index}"):
+                    _process_failed_upload_with_ai(result_index)
 
 
-def _render_receipt_preview(filename, file_content, receipt_id, info, status):
+def _render_receipt_preview(filename, file_content, receipt_id, info, status, result_index):
     """Render extraction preview and tell the user to confirm from Pending receipts."""
     extraction = info.get('extraction', {}) if info else {}
+    extraction_method = info.get('extraction_method', 'ocr') if info else 'ocr'
 
     with st.container(border=True):
         st.subheader(f"Review: {filename}")
@@ -167,6 +176,7 @@ def _render_receipt_preview(filename, file_content, receipt_id, info, status):
 
         with col2:
             st.write("Extracted Summary")
+            st.caption(f"Source: {extraction_method.upper()}")
             st.write(f"Merchant: {extraction.get('merchant_name', 'Unknown')}")
             st.write(f"Purchase Date: {extraction.get('purchase_date', 'Unknown')}")
             st.write(f"Total Amount: {extraction.get('currency', 'USD')} {extraction.get('total_amount', 0)}")
@@ -175,6 +185,9 @@ def _render_receipt_preview(filename, file_content, receipt_id, info, status):
             st.write(f"Tax Deductible: {'Yes' if extraction.get('tax_deductible') else 'No'}")
             if extraction.get('deduction_evidence'):
                 st.write(f"Deduction Evidence: {extraction.get('deduction_evidence')}")
+
+            if extraction_method == 'ocr' and extraction.get('confidence_score', 0) < 0.75:
+                st.warning("OCR confidence is limited. If fields look wrong, re-read this receipt with AI.")
 
         items = extraction.get('items', [])
         if items:
@@ -189,7 +202,60 @@ def _render_receipt_preview(filename, file_content, receipt_id, info, status):
                         f"{duplicate['purchase_date']} | ${duplicate['total_amount']:.2f}"
                     )
 
+        if extraction_method == 'ocr' and receipt_id:
+            if st.button("Re-read With AI", key=f"upload-reread-ai-{receipt_id}"):
+                _reread_receipt_with_ai(result_index)
+
         st.info(f"Receipt #{receipt_id} now requires confirmation in Receipts > Pending.")
+
+
+def _reread_receipt_with_ai(result_index: int):
+    """Re-read an OCR-created pending receipt with AI and update the cached preview."""
+    result = st.session_state.upload_processing_results[result_index]
+    db = get_database()
+    storage = get_file_storage()
+    ingestion_service = ReceiptIngestionService(db, storage)
+
+    try:
+        update_info = asyncio.run(
+            ingestion_service.reread_receipt_with_ai(
+                family_id=st.session_state.family_id,
+                receipt_id=result['receipt_id'],
+            )
+        )
+        result['status'] = update_info['status']
+        result['info'] = update_info
+        st.session_state.upload_processing_results[result_index] = result
+        st.rerun()
+    except Exception as exc:
+        st.error(f"AI re-read failed: {exc}")
+
+
+def _process_failed_upload_with_ai(result_index: int):
+    """Retry a failed OCR upload with AI extraction instead."""
+    result = st.session_state.upload_processing_results[result_index]
+    db = get_database()
+    storage = get_file_storage()
+    ingestion_service = ReceiptIngestionService(db, storage)
+
+    try:
+        status, receipt_id, info = asyncio.run(
+            ingestion_service.process_receipt_upload(
+                family_id=st.session_state.family_id,
+                user_id=st.session_state.user_id,
+                file_content=result['file_content'],
+                filename=result['filename'],
+                mime_type=result['mime_type'],
+                extraction_method='ai',
+            )
+        )
+        result['status'] = status
+        result['receipt_id'] = receipt_id
+        result['info'] = info
+        st.session_state.upload_processing_results[result_index] = result
+        st.rerun()
+    except Exception as exc:
+        st.error(f"AI processing failed: {exc}")
 
 
 def _resize_image_for_preview(file_content: bytes, max_width: int = 520, max_height: int = 720) -> bytes:

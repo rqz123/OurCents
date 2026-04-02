@@ -15,8 +15,9 @@ from models.schema import (
 from storage.database import Database
 from storage.file_storage import FileStorage
 from services.ai import get_ai_provider
+from services.classification_rules_service import ClassificationRulesService
+from services.ocr_receipt_extractor import OCRReceiptExtractor
 from domain.deduplication import DuplicateDetector
-from domain.classification import ClassificationEngine
 from domain.deduction_rules import DeductionRules
 
 
@@ -42,7 +43,9 @@ class ReceiptIngestionService:
         self.db = database
         self.storage = file_storage
         self.ai_provider = get_ai_provider()
+        self.ocr_extractor = OCRReceiptExtractor()
         self.duplicate_detector = DuplicateDetector()
+        self.classification_rules = ClassificationRulesService(database)
     
     async def process_receipt_upload(
         self,
@@ -50,7 +53,8 @@ class ReceiptIngestionService:
         user_id: int,
         file_content: bytes,
         filename: str,
-        mime_type: str
+        mime_type: str,
+        extraction_method: str = 'ocr',
     ) -> Tuple[str, Optional[int], Optional[dict]]:
         """
         Process uploaded receipt through full ingestion pipeline.
@@ -90,21 +94,31 @@ class ReceiptIngestionService:
         logger.info("Stored temporary upload filename=%s temp_path=%s", filename, temp_path)
         
         try:
-            # Step 4: Extract data using AI
-            extraction_result = await self.ai_provider.extract_receipt_data(
-                file_content, mime_type
+            # Step 4: Extract data using OCR or AI.
+            extraction_result = await self._extract_receipt_data(
+                file_content,
+                mime_type,
+                extraction_method,
             )
+
+            item_descriptions = [item.description for item in extraction_result.items]
+            classification_result = self.classification_rules.classify_receipt(
+                family_id,
+                extraction_result.category_suggestion,
+                extraction_result.merchant_name,
+                item_descriptions,
+            )
+            effective_merchant_name = classification_result['merchant_name']
+            merchant_normalized = classification_result['merchant_normalized']
+
             logger.info(
-                "AI extraction finished filename=%s merchant=%s amount=%s confidence=%.2f",
+                "AI extraction finished filename=%s merchant=%s resolved_merchant=%s amount=%s confidence=%.2f rule_source=%s",
                 filename,
                 extraction_result.merchant_name,
+                effective_merchant_name,
                 extraction_result.total_amount,
                 extraction_result.confidence_score,
-            )
-            
-            # Step 5: Normalize merchant name
-            merchant_normalized = self.duplicate_detector.normalize_merchant_name(
-                extraction_result.merchant_name
+                classification_result['rule_source'],
             )
             
             # Step 6: Check for semantic duplicates
@@ -129,12 +143,12 @@ class ReceiptIngestionService:
                     file_size=len(file_content),
                     mime_type=mime_type,
                     temp_path=temp_path,
-                    merchant_name=extraction_result.merchant_name,
+                    merchant_name=effective_merchant_name,
                     merchant_normalized=merchant_normalized,
                     purchase_date=extraction_result.purchase_date,
                     total_amount=extraction_result.total_amount,
                     currency=extraction_result.currency,
-                    category=extraction_result.category_suggestion,
+                    category=classification_result['category'],
                     confidence_score=extraction_result.confidence_score,
                     items=extraction_result.items,
                     is_deductible=extraction_result.tax_deductible,
@@ -150,21 +164,17 @@ class ReceiptIngestionService:
                     'duplicates': semantic_duplicates,
                     'extraction': self._serialize_extraction_result(extraction_result),
                     'storage_path': storage_path,
+                    'extraction_method': extraction_method,
                 }
             
-            # Step 7: Refine classification
-            item_descriptions = [item.description for item in extraction_result.items]
-            final_category = ClassificationEngine.refine_classification(
-                extraction_result.category_suggestion,
-                extraction_result.merchant_name,
-                item_descriptions
-            )
+            # Step 7: Apply configurable classification result.
+            final_category = classification_result['category']
             
             # Step 8: Evaluate tax deduction
             is_deductible, deduction_type, evidence, evidence_level = \
                 DeductionRules.evaluate_deduction(
                     final_category,
-                    extraction_result.merchant_name,
+                    effective_merchant_name,
                     item_descriptions,
                     extraction_result.deduction_type,
                     extraction_result.deduction_evidence
@@ -179,7 +189,7 @@ class ReceiptIngestionService:
                 file_size=len(file_content),
                 mime_type=mime_type,
                 temp_path=temp_path,
-                merchant_name=extraction_result.merchant_name,
+                merchant_name=effective_merchant_name,
                 merchant_normalized=merchant_normalized,
                 purchase_date=extraction_result.purchase_date,
                 total_amount=extraction_result.total_amount,
@@ -200,6 +210,7 @@ class ReceiptIngestionService:
             return 'pending_confirmation', receipt_id, {
                 'extraction': self._serialize_extraction_result(extraction_result),
                 'storage_path': storage_path,
+                'extraction_method': extraction_method,
             }
             
         except Exception as e:
@@ -208,6 +219,47 @@ class ReceiptIngestionService:
                 os.remove(temp_path)
             logger.exception("Receipt processing failed filename=%s", filename)
             raise RuntimeError(f"Receipt processing failed: {str(e)}")
+
+    async def reread_receipt_with_ai(
+        self,
+        family_id: int,
+        receipt_id: int,
+    ) -> dict:
+        """Re-read an OCR-created pending receipt with AI and update it in place."""
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT r.id, r.status, uf.filename, uf.mime_type, uf.storage_path
+                FROM receipts r
+                JOIN upload_files uf ON uf.id = r.upload_file_id
+                WHERE r.family_id = ? AND r.id = ?
+                """,
+                (family_id, receipt_id),
+            )
+            row = cursor.fetchone()
+
+        if row is None:
+            raise ValueError("Receipt not found")
+
+        if row['status'] not in (ReceiptStatus.PENDING.value, ReceiptStatus.DUPLICATE_SUSPECTED.value):
+            raise ValueError("Only pending receipts can be re-read with AI")
+
+        file_content = self.storage.get_file(row['storage_path'])
+        if file_content is None:
+            raise ValueError("Receipt image file not found")
+
+        extraction_result = await self._extract_receipt_data(file_content, row['mime_type'], 'ai')
+        update_info = self._update_receipt_from_extraction(
+            family_id=family_id,
+            receipt_id=receipt_id,
+            extraction_result=extraction_result,
+            current_status=ReceiptStatus(row['status']),
+        )
+        update_info['extraction'] = self._serialize_extraction_result(extraction_result)
+        update_info['extraction_method'] = 'ai'
+        update_info['filename'] = row['filename']
+        return update_info
     
     def _check_hash_duplicate(self, file_hash: str, family_id: int) -> bool:
         """Check if file hash already exists for this family."""
@@ -224,18 +276,28 @@ class ReceiptIngestionService:
         family_id: int,
         merchant_normalized: str,
         purchase_date: datetime,
-        total_amount: float
+        total_amount: float,
+        exclude_receipt_id: Optional[int] = None,
     ) -> List[dict]:
         """Find semantic duplicate candidates."""
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            query = """
                 SELECT id, merchant_name, merchant_normalized, purchase_date, total_amount
                 FROM receipts
                 WHERE family_id = ? AND merchant_normalized = ?
+            """
+            params = [family_id, merchant_normalized]
+
+            if exclude_receipt_id is not None:
+                query += " AND id != ?"
+                params.append(exclude_receipt_id)
+
+            query += """
                 ORDER BY purchase_date DESC
                 LIMIT 10
-            """, (family_id, merchant_normalized))
+            """
+            cursor.execute(query, params)
             
             existing = [dict(row) for row in cursor.fetchall()]
             
@@ -308,6 +370,71 @@ class ReceiptIngestionService:
                 family_id,
                 new_status.value,
             )
+
+    def delete_receipt(
+        self,
+        family_id: int,
+        receipt_id: int,
+        acting_user_id: int,
+    ) -> dict:
+        """Delete a receipt and its stored image. Only family admins may perform this action."""
+        if not self._is_family_admin(acting_user_id, family_id):
+            raise ValueError("Only admins can delete receipts")
+
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT r.id, r.merchant_name, r.purchase_date, r.total_amount, r.currency,
+                       r.status, uf.id AS upload_file_id, uf.storage_path
+                FROM receipts r
+                JOIN upload_files uf ON uf.id = r.upload_file_id
+                WHERE r.id = ? AND r.family_id = ?
+                """,
+                (receipt_id, family_id),
+            )
+            receipt = cursor.fetchone()
+
+            if receipt is None:
+                raise ValueError("Receipt not found")
+
+            cursor.execute("DELETE FROM receipt_items WHERE receipt_id = ?", (receipt_id,))
+            cursor.execute("DELETE FROM receipt_deductions WHERE receipt_id = ?", (receipt_id,))
+            cursor.execute("DELETE FROM receipts WHERE id = ? AND family_id = ?", (receipt_id, family_id))
+            cursor.execute("DELETE FROM upload_files WHERE id = ? AND family_id = ?", (receipt['upload_file_id'], family_id))
+            cursor.execute(
+                """
+                INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    acting_user_id,
+                    'delete',
+                    'receipt',
+                    receipt_id,
+                    f"Deleted receipt from merchant={receipt['merchant_name']}",
+                ),
+            )
+
+        if receipt['storage_path']:
+            self.storage.delete_file(receipt['storage_path'])
+
+        logger.warning(
+            "Deleted receipt receipt_id=%s family_id=%s by_user=%s merchant=%s",
+            receipt_id,
+            family_id,
+            acting_user_id,
+            receipt['merchant_name'],
+        )
+
+        return {
+            'receipt_id': receipt['id'],
+            'merchant_name': receipt['merchant_name'],
+            'purchase_date': receipt['purchase_date'],
+            'total_amount': receipt['total_amount'],
+            'currency': receipt['currency'],
+            'status': receipt['status'],
+        }
 
     def confirm_receipt(
         self,
@@ -414,6 +541,21 @@ class ReceiptIngestionService:
                 category.value,
                 is_deductible,
             )
+
+        try:
+            self.classification_rules.record_feedback_rule(
+                family_id=family_id,
+                merchant_name=merchant_name,
+                category=category,
+                created_by=None,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to record classification feedback receipt_id=%s family_id=%s merchant=%s",
+                receipt_id,
+                family_id,
+                merchant_name,
+            )
     
     def _save_receipt(
         self,
@@ -504,8 +646,146 @@ class ReceiptIngestionService:
             conn.commit()
             return receipt_id, storage_path
 
+    async def _extract_receipt_data(
+        self,
+        file_content: bytes,
+        mime_type: str,
+        extraction_method: str,
+    ):
+        """Dispatch extraction through OCR first or AI depending on the selected method."""
+        method = extraction_method.lower().strip()
+        if method == 'ocr':
+            return await self.ocr_extractor.extract_receipt_data(file_content, mime_type)
+        if method == 'ai':
+            return await self.ai_provider.extract_receipt_data(file_content, mime_type)
+        raise ValueError(f"Unsupported extraction method: {extraction_method}")
+
+    def _update_receipt_from_extraction(
+        self,
+        family_id: int,
+        receipt_id: int,
+        extraction_result,
+        current_status: ReceiptStatus,
+    ) -> dict:
+        """Update an existing receipt in place after a re-read."""
+        item_descriptions = [item.description for item in extraction_result.items]
+        classification_result = self.classification_rules.classify_receipt(
+            family_id,
+            extraction_result.category_suggestion,
+            extraction_result.merchant_name,
+            item_descriptions,
+        )
+        final_category = classification_result['category']
+        effective_merchant_name = classification_result['merchant_name']
+        merchant_normalized = classification_result['merchant_normalized']
+
+        is_deductible, deduction_type, evidence, evidence_level = DeductionRules.evaluate_deduction(
+            final_category,
+            effective_merchant_name,
+            item_descriptions,
+            extraction_result.deduction_type,
+            extraction_result.deduction_evidence,
+        )
+
+        semantic_duplicates = self._find_semantic_duplicates(
+            family_id,
+            merchant_normalized,
+            extraction_result.purchase_date,
+            extraction_result.total_amount,
+            exclude_receipt_id=receipt_id,
+        )
+        next_status = ReceiptStatus.DUPLICATE_SUSPECTED if semantic_duplicates else current_status
+
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE receipts
+                SET merchant_name = ?,
+                    merchant_normalized = ?,
+                    purchase_date = ?,
+                    total_amount = ?,
+                    currency = ?,
+                    category = ?,
+                    status = ?,
+                    confidence_score = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND family_id = ?
+                """,
+                (
+                    effective_merchant_name,
+                    merchant_normalized,
+                    _normalize_purchase_date_for_storage(extraction_result.purchase_date),
+                    extraction_result.total_amount,
+                    extraction_result.currency,
+                    final_category.value,
+                    next_status.value,
+                    extraction_result.confidence_score,
+                    receipt_id,
+                    family_id,
+                ),
+            )
+
+            cursor.execute("DELETE FROM receipt_items WHERE receipt_id = ?", (receipt_id,))
+            for item in extraction_result.items:
+                cursor.execute(
+                    """
+                    INSERT INTO receipt_items (receipt_id, description, quantity, unit_price, total_price, category)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        receipt_id,
+                        item.description,
+                        item.quantity,
+                        item.unit_price,
+                        item.total_price,
+                        item.category.value,
+                    ),
+                )
+
+            cursor.execute(
+                """
+                UPDATE receipt_deductions
+                SET is_deductible = ?,
+                    deduction_type = ?,
+                    evidence_text = ?,
+                    evidence_level = ?,
+                    amount = ?
+                WHERE receipt_id = ?
+                """,
+                (
+                    is_deductible,
+                    deduction_type.value,
+                    evidence,
+                    evidence_level.value,
+                    extraction_result.total_amount if is_deductible else 0.0,
+                    receipt_id,
+                ),
+            )
+
+        return {
+            'storage_path': None,
+            'duplicates': semantic_duplicates,
+            'reason': 'Similar receipt found' if semantic_duplicates else None,
+            'status': 'duplicate_semantic' if semantic_duplicates else 'pending_confirmation',
+        }
+
     def _serialize_extraction_result(self, extraction_result) -> dict:
         """Convert extraction result into JSON-safe preview data."""
         data = extraction_result.model_dump(mode='json')
         data['purchase_date'] = extraction_result.purchase_date.isoformat()
         return data
+
+    def _is_family_admin(self, user_id: int, family_id: int) -> bool:
+        """Return whether the user is an admin in the target family."""
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT role FROM family_members
+                WHERE user_id = ? AND family_id = ?
+                """,
+                (user_id, family_id),
+            )
+            row = cursor.fetchone()
+            return row is not None and row['role'] == 'admin'
