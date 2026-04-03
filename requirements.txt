@@ -13,7 +13,6 @@ sqlalchemy==2.0.27
 pydantic==2.6.1
 pillow==10.2.0
 python-multipart==0.0.9
-pytesseract==0.3.13
 
 # Security
 bcrypt==4.1.2

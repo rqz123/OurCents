@@ -5,14 +5,7 @@ This guide covers local setup, first use, and the current workflow.
 ## Prerequisites
 
 - Python 3.10 or higher
-- Tesseract OCR installed locally
 - OpenAI API key
-
-On macOS:
-
-```bash
-brew install tesseract
-```
 
 ## Quick Start
 
@@ -80,16 +73,14 @@ Open `http://localhost:8501` in your browser.
 1. Open `Upload Receipt` from the sidebar.
 2. Drop in a receipt image or browse for a file.
 3. Click `Process Receipts`.
-4. Review the OCR extraction preview.
-5. If OCR looks wrong, use `Re-read With AI` from the preview card.
-6. Open `Receipts` and switch to the pending view.
-7. Edit fields if needed and confirm the receipt.
+4. Review the extraction preview.
+5. Open `Receipts` and switch to the pending view.
+6. Edit fields if needed and confirm the receipt.
 
 ## Current Workflow Notes
 
 ### Upload
-- Upload scans and previews receipts with OCR first.
-- Each OCR result can be re-read with AI from the preview card.
+- Upload scans and previews receipts.
 - Upload does not directly confirm receipts.
 - After processing completes, the uploader returns to its empty state.
 
@@ -131,13 +122,6 @@ If receipt processing fails:
 1. Check that your API key is valid.
 2. Confirm the image is a supported format.
 3. Review the terminal logs for extraction or provider errors.
-
-### OCR Unavailable
-
-If OCR fails before extraction starts:
-1. Confirm that `tesseract` is installed and available in your shell.
-2. Restart the app after installing Tesseract.
-3. Use the AI fallback button on failed uploads if OCR is temporarily unavailable.
 
 ## Data Locations
 

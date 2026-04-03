@@ -252,96 +252,33 @@ def test_non_admin_cannot_delete_receipt(monkeypatch, test_db, tmp_path):
         service.delete_receipt(family_id, receipt_id, member_user_id)
 
 
-def test_process_receipt_upload_defaults_to_ocr(monkeypatch, test_db, tmp_path):
-    """OCR-first processing should create a pending receipt without calling AI."""
-    db, family_id, user_id = test_db
-    storage = FileStorage(str(tmp_path))
-
-    class DummyAIProvider:
-        async def extract_receipt_data(self, image_content, mime_type):
-            raise AssertionError('AI should not be used in OCR-first test')
-
-    monkeypatch.setattr('services.receipt_ingestion_service.get_ai_provider', lambda: DummyAIProvider())
-    service = ReceiptIngestionService(db, storage)
-
-    async def fake_ocr_extract(image_content, mime_type):
-        return ReceiptExtractionResult(
-            merchant_name="Trader Joe's",
-            purchase_date=datetime(2026, 4, 2, 12, 0, 0),
-            total_amount=23.45,
-            currency='USD',
-            items=[
-                ReceiptItemData(
-                    description='Bananas',
-                    quantity=1.0,
-                    unit_price=2.49,
-                    total_price=2.49,
-                    category=ExpenseCategory.FOOD,
-                )
-            ],
-            confidence_score=0.67,
-            category_suggestion=ExpenseCategory.FOOD,
-        )
-
-    monkeypatch.setattr(service.ocr_extractor, 'extract_receipt_data', fake_ocr_extract)
-
-    status, receipt_id, info = asyncio.run(
-        service.process_receipt_upload(
-            family_id=family_id,
-            user_id=user_id,
-            file_content=b'fake-image',
-            filename='receipt.jpg',
-            mime_type='image/jpeg',
-            extraction_method='ocr',
-        )
-    )
-
-    assert status == 'pending_confirmation'
-    assert receipt_id is not None
-    assert info['extraction_method'] == 'ocr'
-    assert info['extraction']['merchant_name'] == "Trader Joe's"
-
-
-def test_reread_receipt_with_ai_updates_existing_pending_receipt(monkeypatch, test_db, tmp_path):
-    """AI re-read should update the existing receipt in place rather than flagging itself as a duplicate."""
+def test_process_receipt_upload_uses_ai_provider(monkeypatch, test_db, tmp_path):
+    """Upload processing should use the AI provider and create a pending receipt."""
     db, family_id, user_id = test_db
     storage = FileStorage(str(tmp_path))
 
     class DummyAIProvider:
         async def extract_receipt_data(self, image_content, mime_type):
             return ReceiptExtractionResult(
-                merchant_name='Safeway',
-                purchase_date=datetime(2026, 4, 3, 9, 30, 0),
-                total_amount=31.2,
+                merchant_name="Trader Joe's",
+                purchase_date=datetime(2026, 4, 2, 12, 0, 0),
+                total_amount=23.45,
                 currency='USD',
                 items=[
                     ReceiptItemData(
-                        description='Milk',
+                        description='Bananas',
                         quantity=1.0,
-                        unit_price=4.29,
-                        total_price=4.29,
+                        unit_price=2.49,
+                        total_price=2.49,
                         category=ExpenseCategory.FOOD,
                     )
                 ],
-                confidence_score=0.94,
+                confidence_score=0.91,
                 category_suggestion=ExpenseCategory.FOOD,
             )
 
     monkeypatch.setattr('services.receipt_ingestion_service.get_ai_provider', lambda: DummyAIProvider())
     service = ReceiptIngestionService(db, storage)
-
-    async def fake_ocr_extract(image_content, mime_type):
-        return ReceiptExtractionResult(
-            merchant_name='Unknown Merchant',
-            purchase_date=datetime(2026, 4, 3, 9, 30, 0),
-            total_amount=31.2,
-            currency='USD',
-            items=[],
-            confidence_score=0.41,
-            category_suggestion=ExpenseCategory.OTHER,
-        )
-
-    monkeypatch.setattr(service.ocr_extractor, 'extract_receipt_data', fake_ocr_extract)
 
     status, receipt_id, info = asyncio.run(
         service.process_receipt_upload(
@@ -350,31 +287,13 @@ def test_reread_receipt_with_ai_updates_existing_pending_receipt(monkeypatch, te
             file_content=b'fake-image',
             filename='receipt.jpg',
             mime_type='image/jpeg',
-            extraction_method='ocr',
         )
     )
 
     assert status == 'pending_confirmation'
-    assert info['extraction_method'] == 'ocr'
-
-    update_info = asyncio.run(service.reread_receipt_with_ai(family_id, receipt_id))
-
-    assert update_info['status'] == 'pending_confirmation'
-    assert update_info['extraction_method'] == 'ai'
-    assert update_info['extraction']['merchant_name'] == 'Safeway'
-
-    with db.get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT merchant_name, category, confidence_score, status FROM receipts WHERE id = ?",
-            (receipt_id,),
-        )
-        receipt = cursor.fetchone()
-
-    assert receipt['merchant_name'] == 'Safeway'
-    assert receipt['category'] == ExpenseCategory.FOOD.value
-    assert receipt['status'] == ReceiptStatus.PENDING.value
-    assert receipt['confidence_score'] == 0.94
+    assert receipt_id is not None
+    assert info['extraction_method'] == 'ai'
+    assert info['extraction']['merchant_name'] == "Trader Joe's"
 
 
 if __name__ == "__main__":

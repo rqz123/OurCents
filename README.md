@@ -2,7 +2,7 @@
 
 OurCents is a self-hosted family receipt management app for local expense tracking, duplicate detection, category analysis, and tax-deductible expense review.
 
-It is designed for small household use with local SQLite storage, local receipt image storage, OCR-first receipt extraction, and optional AI re-reading when OCR results need correction.
+It is designed for small household use with local SQLite storage, local receipt image storage, and AI-assisted receipt extraction.
 
 ## Current Status
 
@@ -10,7 +10,7 @@ The MVP is implemented and usable.
 
 Core capabilities already available:
 - family account creation and member management
-- upload and OCR-first extraction of receipt images
+- upload and AI extraction of receipt images
 - pending confirmation workflow with editable fields and items
 - duplicate detection for exact and similar receipts
 - category-based dashboard analysis for week, month, and year
@@ -20,8 +20,7 @@ Core capabilities already available:
 
 ### Receipt Processing
 - Drag-and-drop or browse receipt uploads
-- OCR-first extraction of merchant, date, amount, items, and category hints
-- One-click AI re-read for OCR results that need a better pass
+- AI extraction of merchant, date, amount, items, and category hints
 - Preview shown immediately after processing
 - Upload widget resets after processing completes
 
@@ -50,21 +49,14 @@ Core capabilities already available:
 - Backend: Python
 - Database: SQLite
 - File Storage: local filesystem
-- Extraction: local Tesseract OCR first, OpenAI optional for re-read, Gemini supported through the provider abstraction
+- AI: OpenAI by default, Gemini supported through the provider abstraction
 
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.10 or higher
-- Tesseract OCR installed locally
 - OpenAI API key
-
-On macOS, install Tesseract with:
-
-```bash
-brew install tesseract
-```
 
 ### Setup
 

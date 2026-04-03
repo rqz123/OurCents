@@ -8,7 +8,7 @@ The end-to-end workflow is implemented:
 
 1. Create a family account
 2. Upload receipt images
-3. Extract data with OCR first and optionally re-read with AI
+3. Extract data with AI
 4. Detect duplicates
 5. Review and confirm pending receipts
 6. Analyze spending in the dashboard
@@ -33,8 +33,7 @@ The remaining work is primarily product enhancement, documentation alignment, an
 - Admin reset support for database and receipt images
 
 ### Receipt Processing
-- OCR-first extractor implemented with local Tesseract
-- AI provider abstraction retained for re-read and fallback flows
+- AI provider abstraction implemented for receipt extraction
 - OpenAI provider implemented as the primary AI runtime path
 - Gemini provider retained as an alternate provider
 - Structured extraction preview shown after upload
@@ -79,8 +78,7 @@ The remaining work is primarily product enhancement, documentation alignment, an
 ## Current Product Behavior
 
 ### Upload Flow
-- Upload scans and previews receipts with OCR first
-- Each OCR-created pending receipt can be re-read with AI in place
+- Upload scans and previews receipts with AI
 - Confirmation happens in Receipts > Pending
 - After processing completes, the uploader resets to its empty state
 

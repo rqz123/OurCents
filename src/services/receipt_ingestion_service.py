@@ -16,7 +16,6 @@ from storage.database import Database
 from storage.file_storage import FileStorage
 from services.ai import get_ai_provider
 from services.classification_rules_service import ClassificationRulesService
-from services.ocr_receipt_extractor import OCRReceiptExtractor
 from domain.deduplication import DuplicateDetector
 from domain.deduction_rules import DeductionRules
 
@@ -43,7 +42,6 @@ class ReceiptIngestionService:
         self.db = database
         self.storage = file_storage
         self.ai_provider = get_ai_provider()
-        self.ocr_extractor = OCRReceiptExtractor()
         self.duplicate_detector = DuplicateDetector()
         self.classification_rules = ClassificationRulesService(database)
     
@@ -54,7 +52,6 @@ class ReceiptIngestionService:
         file_content: bytes,
         filename: str,
         mime_type: str,
-        extraction_method: str = 'ocr',
     ) -> Tuple[str, Optional[int], Optional[dict]]:
         """
         Process uploaded receipt through full ingestion pipeline.
@@ -94,12 +91,8 @@ class ReceiptIngestionService:
         logger.info("Stored temporary upload filename=%s temp_path=%s", filename, temp_path)
         
         try:
-            # Step 4: Extract data using OCR or AI.
-            extraction_result = await self._extract_receipt_data(
-                file_content,
-                mime_type,
-                extraction_method,
-            )
+            # Step 4: Extract data using AI.
+            extraction_result = await self.ai_provider.extract_receipt_data(file_content, mime_type)
 
             item_descriptions = [item.description for item in extraction_result.items]
             classification_result = self.classification_rules.classify_receipt(
@@ -164,7 +157,7 @@ class ReceiptIngestionService:
                     'duplicates': semantic_duplicates,
                     'extraction': self._serialize_extraction_result(extraction_result),
                     'storage_path': storage_path,
-                    'extraction_method': extraction_method,
+                    'extraction_method': 'ai',
                 }
             
             # Step 7: Apply configurable classification result.
@@ -210,7 +203,7 @@ class ReceiptIngestionService:
             return 'pending_confirmation', receipt_id, {
                 'extraction': self._serialize_extraction_result(extraction_result),
                 'storage_path': storage_path,
-                'extraction_method': extraction_method,
+                'extraction_method': 'ai',
             }
             
         except Exception as e:
@@ -220,47 +213,6 @@ class ReceiptIngestionService:
             logger.exception("Receipt processing failed filename=%s", filename)
             raise RuntimeError(f"Receipt processing failed: {str(e)}")
 
-    async def reread_receipt_with_ai(
-        self,
-        family_id: int,
-        receipt_id: int,
-    ) -> dict:
-        """Re-read an OCR-created pending receipt with AI and update it in place."""
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT r.id, r.status, uf.filename, uf.mime_type, uf.storage_path
-                FROM receipts r
-                JOIN upload_files uf ON uf.id = r.upload_file_id
-                WHERE r.family_id = ? AND r.id = ?
-                """,
-                (family_id, receipt_id),
-            )
-            row = cursor.fetchone()
-
-        if row is None:
-            raise ValueError("Receipt not found")
-
-        if row['status'] not in (ReceiptStatus.PENDING.value, ReceiptStatus.DUPLICATE_SUSPECTED.value):
-            raise ValueError("Only pending receipts can be re-read with AI")
-
-        file_content = self.storage.get_file(row['storage_path'])
-        if file_content is None:
-            raise ValueError("Receipt image file not found")
-
-        extraction_result = await self._extract_receipt_data(file_content, row['mime_type'], 'ai')
-        update_info = self._update_receipt_from_extraction(
-            family_id=family_id,
-            receipt_id=receipt_id,
-            extraction_result=extraction_result,
-            current_status=ReceiptStatus(row['status']),
-        )
-        update_info['extraction'] = self._serialize_extraction_result(extraction_result)
-        update_info['extraction_method'] = 'ai'
-        update_info['filename'] = row['filename']
-        return update_info
-    
     def _check_hash_duplicate(self, file_hash: str, family_id: int) -> bool:
         """Check if file hash already exists for this family."""
         with self.db.get_connection() as conn:
@@ -645,130 +597,6 @@ class ReceiptIngestionService:
             
             conn.commit()
             return receipt_id, storage_path
-
-    async def _extract_receipt_data(
-        self,
-        file_content: bytes,
-        mime_type: str,
-        extraction_method: str,
-    ):
-        """Dispatch extraction through OCR first or AI depending on the selected method."""
-        method = extraction_method.lower().strip()
-        if method == 'ocr':
-            return await self.ocr_extractor.extract_receipt_data(file_content, mime_type)
-        if method == 'ai':
-            return await self.ai_provider.extract_receipt_data(file_content, mime_type)
-        raise ValueError(f"Unsupported extraction method: {extraction_method}")
-
-    def _update_receipt_from_extraction(
-        self,
-        family_id: int,
-        receipt_id: int,
-        extraction_result,
-        current_status: ReceiptStatus,
-    ) -> dict:
-        """Update an existing receipt in place after a re-read."""
-        item_descriptions = [item.description for item in extraction_result.items]
-        classification_result = self.classification_rules.classify_receipt(
-            family_id,
-            extraction_result.category_suggestion,
-            extraction_result.merchant_name,
-            item_descriptions,
-        )
-        final_category = classification_result['category']
-        effective_merchant_name = classification_result['merchant_name']
-        merchant_normalized = classification_result['merchant_normalized']
-
-        is_deductible, deduction_type, evidence, evidence_level = DeductionRules.evaluate_deduction(
-            final_category,
-            effective_merchant_name,
-            item_descriptions,
-            extraction_result.deduction_type,
-            extraction_result.deduction_evidence,
-        )
-
-        semantic_duplicates = self._find_semantic_duplicates(
-            family_id,
-            merchant_normalized,
-            extraction_result.purchase_date,
-            extraction_result.total_amount,
-            exclude_receipt_id=receipt_id,
-        )
-        next_status = ReceiptStatus.DUPLICATE_SUSPECTED if semantic_duplicates else current_status
-
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE receipts
-                SET merchant_name = ?,
-                    merchant_normalized = ?,
-                    purchase_date = ?,
-                    total_amount = ?,
-                    currency = ?,
-                    category = ?,
-                    status = ?,
-                    confidence_score = ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND family_id = ?
-                """,
-                (
-                    effective_merchant_name,
-                    merchant_normalized,
-                    _normalize_purchase_date_for_storage(extraction_result.purchase_date),
-                    extraction_result.total_amount,
-                    extraction_result.currency,
-                    final_category.value,
-                    next_status.value,
-                    extraction_result.confidence_score,
-                    receipt_id,
-                    family_id,
-                ),
-            )
-
-            cursor.execute("DELETE FROM receipt_items WHERE receipt_id = ?", (receipt_id,))
-            for item in extraction_result.items:
-                cursor.execute(
-                    """
-                    INSERT INTO receipt_items (receipt_id, description, quantity, unit_price, total_price, category)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        receipt_id,
-                        item.description,
-                        item.quantity,
-                        item.unit_price,
-                        item.total_price,
-                        item.category.value,
-                    ),
-                )
-
-            cursor.execute(
-                """
-                UPDATE receipt_deductions
-                SET is_deductible = ?,
-                    deduction_type = ?,
-                    evidence_text = ?,
-                    evidence_level = ?,
-                    amount = ?
-                WHERE receipt_id = ?
-                """,
-                (
-                    is_deductible,
-                    deduction_type.value,
-                    evidence,
-                    evidence_level.value,
-                    extraction_result.total_amount if is_deductible else 0.0,
-                    receipt_id,
-                ),
-            )
-
-        return {
-            'storage_path': None,
-            'duplicates': semantic_duplicates,
-            'reason': 'Similar receipt found' if semantic_duplicates else None,
-            'status': 'duplicate_semantic' if semantic_duplicates else 'pending_confirmation',
-        }
 
     def _serialize_extraction_result(self, extraction_result) -> dict:
         """Convert extraction result into JSON-safe preview data."""
